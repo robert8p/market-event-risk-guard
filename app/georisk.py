@@ -149,6 +149,69 @@ SOURCE_PRIORITY = {
     "unknown": 9,
 }
 
+FACTOR_TEMPLATES = {
+    "Missile / airstrike activity": {
+        "impact_summary": "Fresh strike reporting is lifting perceived escalation risk.",
+        "market_impact": "Raises odds of oil, gold, index-futures, and crypto volatility if retaliation widens.",
+        "transmission": "Direct market risk",
+    },
+    "Retaliation cycle": {
+        "impact_summary": "Action-reaction headlines suggest the conflict loop is still active.",
+        "market_impact": "Extends the window for abrupt risk-off moves and short-term energy spikes.",
+        "transmission": "Direct market risk",
+    },
+    "Ground-force mobilisation": {
+        "impact_summary": "Ground-force activity implies a more durable and harder-to-contain conflict phase.",
+        "market_impact": "Supports a broader risk premium across energy, equities, bonds, and haven assets.",
+        "transmission": "Direct market risk",
+    },
+    "Proxy militia activity": {
+        "impact_summary": "Proxy-group activity keeps the flashpoint live even without a formal state-on-state escalation.",
+        "market_impact": "Can unsettle shipping, oil, and regional-risk pricing even when major capitals sound restrained.",
+        "transmission": "Direct market risk",
+    },
+    "Shipping / route disruption": {
+        "impact_summary": "Trade-route disruption risk is rising around key maritime corridors.",
+        "market_impact": "Most directly affects oil, freight, inflation expectations, and broad risk sentiment.",
+        "transmission": "Direct market risk",
+    },
+    "Oil-supply disruption risk": {
+        "impact_summary": "Coverage points to a higher chance of energy-supply stress.",
+        "market_impact": "Most relevant to crude, inflation-sensitive assets, and knock-on equity volatility.",
+        "transmission": "Direct market risk",
+    },
+    "Sanctions / export-control pressure": {
+        "impact_summary": "Policy pressure is increasing through sanctions or trade restrictions.",
+        "market_impact": "Usually works through funding, shipping, and supply-chain channels rather than instant price shock.",
+        "transmission": "Indirect market risk",
+    },
+    "US military posture": {
+        "impact_summary": "U.S. military positioning suggests contingency planning or deterrence is being tightened.",
+        "market_impact": "Markets usually read this as a signal that escalation risk is being taken seriously.",
+        "transmission": "Direct market risk",
+    },
+    "Nuclear programme tension": {
+        "impact_summary": "Nuclear-linked headlines raise the ceiling on how severe the confrontation could become.",
+        "market_impact": "Can amplify haven demand and widen the geopolitical risk premium quickly.",
+        "transmission": "Direct market risk",
+    },
+    "Casualty / hostage risk": {
+        "impact_summary": "Civilian-casualty or hostage headlines increase the odds of politically forced escalation.",
+        "market_impact": "Can harden positions, reduce room for diplomacy, and lift short-term volatility.",
+        "transmission": "Indirect market risk",
+    },
+    "Diplomatic activity": {
+        "impact_summary": "Diplomatic reporting is softening the immediate escalation signal, not removing the flashpoint.",
+        "market_impact": "Can calm risk pricing at the margin, though markets usually wait for repeated confirmation.",
+        "transmission": "Limited immediate transmission",
+    },
+    "Conflict coverage active": {
+        "impact_summary": "General conflict coverage remains active even where the trigger is not specific enough to bucket cleanly.",
+        "market_impact": "Keeps a background geopolitical premium in place but is less market-moving than a concrete trigger.",
+        "transmission": "Indirect market risk",
+    },
+}
+
 
 class GeopoliticalRiskService:
     def __init__(self) -> None:
@@ -162,7 +225,7 @@ class GeopoliticalRiskService:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.settings.http_timeout_seconds),
                 follow_redirects=True,
-                headers={"User-Agent": "MarketEventRiskGuard/2.3.1 (+https://render.com)"},
+                headers={"User-Agent": "MarketEventRiskGuard/2.4.0 (+https://render.com)"},
             )
         return self._client
 
@@ -857,8 +920,58 @@ class GeopoliticalRiskService:
             fams = sorted(item.get("source_families", []))
             item["source_families"] = fams
             item["source_count"] = len(fams)
+            item["impact_summary"] = self._factor_impact_summary(item)
+            item["market_impact"] = self._factor_market_impact(item)
+            item["market_transmission"] = self._factor_market_transmission(item)
+            item["estimated_score_effect"] = self._estimate_factor_score_effect(item)
+            item["estimated_score_effect_label"] = self._format_score_effect(item["estimated_score_effect"])
+            item["evidence_strength"] = self._factor_evidence_strength(item)
             out.append(item)
         return out
+
+    def _factor_template(self, label: str) -> dict:
+        return FACTOR_TEMPLATES.get(label, FACTOR_TEMPLATES["Conflict coverage active"])
+
+    def _factor_impact_summary(self, factor: dict) -> str:
+        return self._factor_template(factor.get("label", "Conflict coverage active"))["impact_summary"]
+
+    def _factor_market_impact(self, factor: dict) -> str:
+        return self._factor_template(factor.get("label", "Conflict coverage active"))["market_impact"]
+
+    def _factor_market_transmission(self, factor: dict) -> str:
+        return self._factor_template(factor.get("label", "Conflict coverage active"))["transmission"]
+
+    def _estimate_factor_score_effect(self, factor: dict) -> int:
+        kind = factor.get("kind", "context")
+        count = int(factor.get("count", 0) or 0)
+        source_count = int(factor.get("source_count", 0) or 0)
+        latest = self._parse_date(factor.get("latest_utc", ""))
+        now = datetime.now(timezone.utc)
+        hours = ((now - latest).total_seconds() / 3600) if latest else 999
+        recency_bonus = 2 if hours <= 2 else 1 if hours <= 6 else 0
+        base = {"escalation": 5, "market": 4, "pressure": 3, "context": 1, "deescalation": -3}.get(kind, 1)
+        magnitude = abs(base) + min(3, max(0, count - 1)) + min(2, max(0, source_count - 1)) + recency_bonus
+        if kind == "deescalation":
+            return -min(8, magnitude)
+        return min(12, magnitude)
+
+    @staticmethod
+    def _format_score_effect(effect: int) -> str:
+        if effect > 0:
+            return f"+{effect}"
+        if effect < 0:
+            return f"−{abs(effect)}"
+        return "0"
+
+    @staticmethod
+    def _factor_evidence_strength(factor: dict) -> str:
+        count = int(factor.get("count", 0) or 0)
+        source_count = int(factor.get("source_count", 0) or 0)
+        if count >= 3 and source_count >= 2:
+            return "High"
+        if count >= 2 or source_count >= 2:
+            return "Medium"
+        return "Low"
 
     @staticmethod
     def _factor_snippet(risk_factors: list[dict]) -> str:

@@ -239,3 +239,31 @@ def test_middle_east_region_gate_keeps_iran_sanctions_title():
         "treasury sanctions shipping network moving iranian oil",
         monitor,
     )
+
+
+def test_risk_factor_exposes_interpreted_impact_fields():
+    svc = GeopoliticalRiskService()
+    factors = svc._extract_risk_factors([
+        {**_article("Missile strike raises fears over Strait of Hormuz shipping", "20260317T090000Z", "google_news")},
+    ], [])
+    assert factors
+    f = factors[0]
+    assert f["impact_summary"]
+    assert f["market_impact"]
+    assert f["market_transmission"] == "Direct market risk"
+    assert f["estimated_score_effect"] > 0
+    assert f["estimated_score_effect_label"].startswith("+")
+    assert f["evidence_strength"] in {"Low", "Medium", "High"}
+
+
+def test_diplomatic_factor_shows_softening_effect():
+    svc = GeopoliticalRiskService()
+    factors = svc._extract_risk_factors([], [
+        {**_article("Regional diplomats push ceasefire in Gaza", "20260317T084500Z", "state_press", "deescalation")},
+    ])
+    assert factors
+    f = factors[0]
+    assert f["label"] == "Diplomatic activity"
+    assert f["estimated_score_effect"] < 0
+    assert f["estimated_score_effect_label"].startswith("−")
+    assert "softening" in f["impact_summary"].lower()

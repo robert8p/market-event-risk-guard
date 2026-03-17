@@ -1,4 +1,4 @@
-# Market Event Risk Guard v2.3.1
+# Market Event Risk Guard v2.4.0
 
 A production-ready event-risk filter for technical traders. Identifies when external events could distort normal price behaviour, making technical indicators unreliable.
 
@@ -173,8 +173,15 @@ These are the next sources worth adding to make the geopolitical score more insi
 - **Options-implied volatility and cross-asset stress indicators** to show whether markets are actually pricing the geopolitical move.
 
 
-## v2.3 geopolitical change
+## v2.4 geopolitical change
 
 - Removed GDELT from score-setting and event-refresh orchestration.
 - Geopolitical scoring now uses low-latency sources: Google News RSS, NewsAPI (optional), Treasury press, Defense releases, State press, and OFAC recent actions.
 - Goal: more stable scores, fewer rate-limit bottlenecks, and clearer official-source weighting.
+
+
+## v2.4 interpreted factor explanations
+
+- Replaced raw-headline-first geopolitical factor tiles with interpreted impact cards.
+- Each factor now shows: what it means, why markets care, estimated score effect, evidence strength, and supporting evidence on demand.
+- Headlines remain available as supporting evidence rather than the primary explanation.

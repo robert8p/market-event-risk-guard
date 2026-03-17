@@ -153,7 +153,7 @@
         + '<div class="tg-label">' + esc(gaugeLabel) + '</div>'
         + '</div>'
         + '<div class="threat-body">'
-        + '<div class="tb-title">' + esc(t.label) + ' <span class="threat-v2-badge">v2.3.1</span></div>'
+        + '<div class="tb-title">' + esc(t.label) + ' <span class="threat-v2-badge">v2.4.0</span></div>'
         + '<div class="threat-bar-track"><div class="threat-bar-fill ' + barCls + '" style="width:' + barWidth + '%"></div></div>'
         + freshnessHtml
         + '<div class="tb-detail">' + esc(t.detail) + '</div>'
@@ -190,24 +190,26 @@
     const items = factors.map((f) => {
       const cls = "rf-" + (f.kind || "context");
       const age = fmtAgo(f.latest_utc);
-      const meta = [(f.count || 0) + " hit" + ((f.count || 0) === 1 ? "" : "s"), (f.source_count || 0) + " source" + ((f.source_count || 0) === 1 ? "" : "s"), age].filter(Boolean).join(" · ");
-      const titleAttr = f.latest_title ? ' title="' + esc(f.latest_title) + '"' : "";
-      const latestTitle = f.latest_title ? '<div class="rf-title">' + esc(f.latest_title) + '</div>' : '';
-      return '<li class="risk-factor ' + cls + '"' + titleAttr + '>'
-        + '<div class="rf-name">' + esc(f.label) + '</div>'
-        + latestTitle
-        + '<div class="rf-meta">' + esc(meta) + '</div>'
+      const evidence = [(f.count || 0) + " hit" + ((f.count || 0) === 1 ? "" : "s"), (f.source_count || 0) + " source" + ((f.source_count || 0) === 1 ? "" : "s"), age].filter(Boolean).join(" · ");
+      const effect = f.estimated_score_effect_label || "0";
+      const effectClass = effect.startsWith("−") ? "rf-effect-soften" : effect === "0" ? "rf-effect-flat" : "rf-effect-rise";
+      const effectText = effect.startsWith("−") ? 'Estimated score effect ' + effect : 'Estimated score effect +' + String(effect).replace(/^\+/, '');
+      const transmission = f.market_transmission || "Indirect market risk";
+      const strength = (f.evidence_strength || "Low") + " evidence";
+      const latestEvidence = f.latest_title ? '<details class="rf-evidence"><summary>Supporting evidence</summary><div class="rf-evidence-line">Latest evidence: ' + esc(f.latest_title) + '</div></details>' : '';
+      return '<li class="risk-factor ' + cls + '">'
+        + '<div class="rf-head"><div class="rf-name">' + esc(f.label) + '</div><span class="rf-effect ' + effectClass + '">' + esc(effectText) + '</span></div>'
+        + '<div class="rf-impact">' + esc(f.impact_summary || '') + '</div>'
+        + '<div class="rf-market-text">' + esc(f.market_impact || '') + '</div>'
+        + '<div class="rf-chip-row">'
+        + '<span class="rf-chip">' + esc(transmission) + '</span>'
+        + '<span class="rf-chip">' + esc(strength) + '</span>'
+        + '<span class="rf-chip">' + esc(evidence) + '</span>'
+        + '</div>'
+        + latestEvidence
         + '</li>';
     }).join("");
     return '<div class="threat-factors"><div class="tf-title">Recent risk factors</div><ul class="risk-factor-list">' + items + '</ul></div>';
-  }
-
-  function kindLabel(kind) {
-    if (kind === "escalation") return "Escalation";
-    if (kind === "market") return "Market impact";
-    if (kind === "pressure") return "Pressure";
-    if (kind === "deescalation") return "De-escalation";
-    return "Context";
   }
 
   function fmtAgo(iso) {

@@ -11,7 +11,7 @@ from pydantic import Field
 
 class Settings(BaseSettings):
     # ── App ──────────────────────────────────────
-    app_name: str = Field(default="Market Event Risk Guard v2.3.1")
+    app_name: str = Field(default="Market Event Risk Guard v2.4.0")
     app_env: str = Field(default="production")
     app_timezone: str = Field(default="Europe/London")
     default_window_hours: int = Field(default=8)
