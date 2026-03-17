@@ -32,7 +32,6 @@ from app.adapters.kraken_status import KrakenStatusAdapter
 from app.adapters.treasury_auctions import TreasuryAuctionAdapter
 from app.adapters.ecb import EcbCalendarAdapter
 from app.adapters.binance_announcements import BinanceAnnouncementsAdapter
-from app.adapters.gdelt_geopolitical import GdeltGeopoliticalAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +66,6 @@ class EventService:
             (s.enable_treasury_auction_adapter, TreasuryAuctionAdapter),
             (s.enable_ecb_calendar_adapter, EcbCalendarAdapter),
             (s.enable_binance_announcements_adapter, BinanceAnnouncementsAdapter),
-            (s.enable_gdelt_geopolitical_adapter, GdeltGeopoliticalAdapter),
         ]
         for enabled, cls in adapter_map:
             adapter = cls()
@@ -204,9 +202,8 @@ class EventService:
 
     # ── Internal refresh logic ───────────────────────────────────────────
 
-    # Names of adapters that are slow due to rate-limit delays or heavy queries.
-    # These run in a deferred pass so they don't block the first page load.
-    _DEFERRED_ADAPTERS = frozenset({"GdeltGeopoliticalAdapter"})
+    # Deferred adapters are optional heavy sources. None are deferred currently.
+    _DEFERRED_ADAPTERS = frozenset()
 
     async def _maybe_refresh(self, force: bool = False) -> None:
         """Refresh the cache if stale.

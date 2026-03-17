@@ -11,7 +11,7 @@ from pydantic import Field
 
 class Settings(BaseSettings):
     # ── App ──────────────────────────────────────
-    app_name: str = Field(default="Market Event Risk Guard v2.2")
+    app_name: str = Field(default="Market Event Risk Guard v2.3")
     app_env: str = Field(default="production")
     app_timezone: str = Field(default="Europe/London")
     default_window_hours: int = Field(default=8)
@@ -35,7 +35,6 @@ class Settings(BaseSettings):
     enable_treasury_auction_adapter: bool = Field(default=True)
     enable_ecb_calendar_adapter: bool = Field(default=True)
     enable_binance_announcements_adapter: bool = Field(default=True)
-    enable_gdelt_geopolitical_adapter: bool = Field(default=True)
 
     # ── TradingEconomics ─────────────────────────
     tradingeconomics_base_url: str = Field(default="https://api.tradingeconomics.com")

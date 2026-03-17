@@ -1,6 +1,9 @@
 """
 Geopolitical threat monitor — computes escalation probability scores from
-GDELT plus higher-value auxiliary sources, then explains the score.
+low-latency official sources plus broad headline coverage, then explains the score.
+
+GDELT has been intentionally removed from score-setting because it introduced
+rate-limit bottlenecks and false oscillation in the geopolitical card.
 """
 
 from __future__ import annotations
@@ -21,22 +24,13 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-GDELT_DOC_API = "https://api.gdeltproject.org/api/v2/doc/doc"
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 TREASURY_PRESS_URL = "https://home.treasury.gov/news/press-releases"
 DEFENSE_RELEASES_RSS = "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=9&Site=945&max=10"
+STATE_PRESS_URL = "https://www.state.gov/press-releases"
+OFAC_RECENT_ACTIONS_URL = "https://ofac.treasury.gov/recent-actions"
 
 LIVE_SCORE_TTL_SECONDS = 900
-FALLBACK_REASSESS_SECONDS = 300
-
-
-class RateLimitError(Exception):
-    def __init__(self, retry_after_seconds: int | None = None):
-        self.retry_after_seconds = retry_after_seconds
-        msg = "GDELT rate-limited"
-        if retry_after_seconds:
-            msg += f"; retry after {retry_after_seconds}s"
-        super().__init__(msg)
 
 
 @dataclass
@@ -68,7 +62,7 @@ class ThreatScore:
     instruments: list[str]
     updated_utc: str
     components: dict
-    source_status: str = "live"  # live | stale | delayed
+    source_status: str = "live"
     source_note: Optional[str] = None
     last_live_utc: Optional[str] = None
     next_live_reassess_utc: Optional[str] = None
@@ -136,7 +130,7 @@ FACTOR_SPECS = [
     {"label": "Ground-force mobilisation", "kind": "escalation", "patterns": ["ground invasion", "troops", "mobilization", "mobilisation", "incursion", "offensive"]},
     {"label": "Proxy militia activity", "kind": "pressure", "patterns": ["hezbollah", "houthi", "militia", "proxy", "armed group"]},
     {"label": "Shipping / route disruption", "kind": "market", "patterns": ["strait of hormuz", "red sea", "shipping", "tanker", "vessel", "cargo ship", "maritime", "shipping lane"]},
-    {"label": "Oil-supply disruption risk", "kind": "market", "patterns": ["oil", "refinery", "pipeline", "energy infrastructure", "production", "supply disruption"]},
+    {"label": "Oil-supply disruption risk", "kind": "market", "patterns": ["oil", "refinery", "pipeline", "energy infrastructure", "production", "supply disruption", "shadow fleet"]},
     {"label": "Sanctions / export-control pressure", "kind": "market", "patterns": ["sanctions", "embargo", "export controls", "trade restrictions"]},
     {"label": "US military posture", "kind": "pressure", "patterns": ["pentagon", "aircraft carrier", "destroyer", "deployment", "u.s. forces", "us forces", "navy"]},
     {"label": "Nuclear programme tension", "kind": "escalation", "patterns": ["nuclear", "uranium", "enrichment", "atomic", "reactor"]},
@@ -145,7 +139,15 @@ FACTOR_SPECS = [
 ]
 
 KIND_PRIORITY = {"escalation": 0, "market": 1, "pressure": 2, "deescalation": 3, "context": 4}
-SOURCE_PRIORITY = {"defense_rss": 0, "treasury_press": 1, "newsapi": 2, "google_news": 3, "gdelt": 4}
+SOURCE_PRIORITY = {
+    "defense_rss": 0,
+    "state_press": 1,
+    "treasury_press": 2,
+    "ofac_recent": 3,
+    "newsapi": 4,
+    "google_news": 5,
+    "unknown": 9,
+}
 
 
 class GeopoliticalRiskService:
@@ -154,15 +156,13 @@ class GeopoliticalRiskService:
         self._client: Optional[httpx.AsyncClient] = None
         self._cache: dict[str, ThreatScore] = {}
         self._cache_time: Optional[datetime] = None
-        self._cooldown_until: Optional[datetime] = None
-        self._cooldown_reason: Optional[str] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.settings.http_timeout_seconds),
                 follow_redirects=True,
-                headers={"User-Agent": "MarketEventRiskGuard/2.2 (+https://render.com)"},
+                headers={"User-Agent": "MarketEventRiskGuard/2.3 (+https://render.com)"},
             )
         return self._client
 
@@ -172,116 +172,71 @@ class GeopoliticalRiskService:
             next_reassess = self._cache_time + timedelta(seconds=LIVE_SCORE_TTL_SECONDS)
             return [self._with_freshness_meta(s, source_status="live", next_live_reassess_utc=next_reassess).to_dict() for s in self._cache.values()]
 
-        if self._cooldown_until and now < self._cooldown_until and self._cache:
-            return [
-                self._with_source_state(
-                    self._with_freshness_meta(s, source_status="stale", next_live_reassess_utc=self._cooldown_until),
-                    "stale",
-                    self._cooldown_reason or "Using last successful reading while live sources cool down.",
-                ).to_dict()
-                for s in self._cache.values()
-            ]
-
         results: list[ThreatScore] = []
-        any_live = False
         for monitor in MONITORS:
             score = await self._assess(monitor)
             results.append(score)
-            if score.source_status == "live":
-                any_live = True
-                self._cache[monitor.id] = score
+            self._cache[monitor.id] = score
 
-        if any_live:
-            self._cache_time = now
-            self._cooldown_until = None
-            self._cooldown_reason = None
-            next_reassess = now + timedelta(seconds=LIVE_SCORE_TTL_SECONDS)
-            results = [self._with_freshness_meta(s, source_status=s.source_status, next_live_reassess_utc=next_reassess) for s in results]
-        elif self._cache:
-            next_reassess = self._cooldown_until or (now + timedelta(seconds=FALLBACK_REASSESS_SECONDS))
-            fallback: list[ThreatScore] = []
-            for score in results:
-                cached = self._cache.get(score.id)
-                if cached:
-                    fallback.append(
-                        self._with_source_state(
-                            self._with_freshness_meta(cached, source_status="stale", next_live_reassess_utc=next_reassess),
-                            "stale",
-                            self._cooldown_reason or "Using last successful reading while live sources are assessing.",
-                        )
-                    )
-                else:
-                    fallback.append(self._with_freshness_meta(score, source_status=score.source_status, next_live_reassess_utc=next_reassess))
-            results = fallback
-        else:
-            next_reassess = self._cooldown_until or (now + timedelta(seconds=FALLBACK_REASSESS_SECONDS))
-            results = [self._with_freshness_meta(s, source_status=s.source_status, next_live_reassess_utc=next_reassess) for s in results]
+        self._cache_time = now
+        next_reassess = now + timedelta(seconds=LIVE_SCORE_TTL_SECONDS)
+        results = [self._with_freshness_meta(s, source_status=s.source_status, next_live_reassess_utc=next_reassess) for s in results]
         return [s.to_dict() for s in results]
 
     async def _assess(self, m: ThreatMonitor) -> ThreatScore:
-        gdelt_limited = False
-        gdelt_unavailable = False
+        source_errors: list[str] = []
         esc_articles: list[dict] = []
         deesc_articles: list[dict] = []
 
-        if not (self._cooldown_until and datetime.now(timezone.utc) < self._cooldown_until):
-            try:
-                esc_articles = await self._query_gdelt(m.escalation_query, m.lookback_hours)
-                await asyncio.sleep(1.25)
-                deesc_articles = await self._query_gdelt(m.deescalation_query, m.lookback_hours)
-            except RateLimitError as exc:
-                gdelt_limited = True
-                self._enter_cooldown(exc.retry_after_seconds)
-                logger.warning(f"[GeoRisk] {m.id} rate limited: {exc}")
-            except Exception as exc:
-                gdelt_unavailable = True
-                logger.warning(f"[GeoRisk] GDELT unavailable for {m.id}: {exc}")
-        else:
-            gdelt_limited = True
-
-        aux_tasks = [
-            self._query_google_news(m.escalation_query, m.lookback_hours, "google_news", "escalation"),
-            self._query_google_news(m.deescalation_query, m.lookback_hours, "google_news", "deescalation"),
-            self._query_newsapi(m.escalation_query, m.lookback_hours, "escalation"),
-            self._query_newsapi(m.deescalation_query, m.lookback_hours, "deescalation"),
-            self._query_treasury_press(m),
-            self._query_defense_releases(m),
+        tasks = [
+            ("google_news_esc", self._query_google_news(m.escalation_query, m.lookback_hours, "google_news", "escalation"), "esc"),
+            ("google_news_deesc", self._query_google_news(m.deescalation_query, m.lookback_hours, "google_news", "deescalation"), "deesc"),
+            ("newsapi_esc", self._query_newsapi(m.escalation_query, m.lookback_hours, "escalation"), "esc"),
+            ("newsapi_deesc", self._query_newsapi(m.deescalation_query, m.lookback_hours, "deescalation"), "deesc"),
+            ("treasury_press", self._query_treasury_press(m), "esc"),
+            ("defense_rss", self._query_defense_releases(m), "esc"),
+            ("state_press", self._query_state_press(m), "both"),
+            ("ofac_recent", self._query_ofac_recent_actions(m), "esc"),
         ]
-        aux_results = await asyncio.gather(*aux_tasks, return_exceptions=True)
-
-        for idx, result in enumerate(aux_results):
+        results = await asyncio_gather_named(tasks)
+        for name, channel, result in results:
             if isinstance(result, Exception):
-                logger.warning(f"[GeoRisk] auxiliary source failed ({idx}): {result}")
+                logger.warning(f"[GeoRisk] source failed ({name}): {result}")
+                source_errors.append(name)
                 continue
-            if idx in {0, 2}:  # google/newsapi escalation
+            if channel == "esc":
                 esc_articles.extend(result)
-            elif idx in {1, 3}:  # google/newsapi de-escalation
+            elif channel == "deesc":
                 deesc_articles.extend(result)
             else:
-                esc_articles.extend(result)
+                for art in result:
+                    kind = (art.get("kind") or "").lower()
+                    if kind == "deescalation":
+                        deesc_articles.append(art)
+                    else:
+                        esc_articles.append(art)
 
         esc_articles = self._dedupe_articles(esc_articles)
         deesc_articles = self._dedupe_articles(deesc_articles)
-
-        source_status = "live"
-        source_note = None
-        if gdelt_limited:
-            source_status = "delayed"
-            source_note = "Assessing from auxiliary and recent coverage while the live geopolitical feed is rate-limited and cooling down."
-        elif gdelt_unavailable and esc_articles + deesc_articles:
-            source_status = "delayed"
-            source_note = "Assessing from auxiliary coverage while the live geopolitical feed is unavailable."
-        elif gdelt_unavailable and not (esc_articles or deesc_articles):
-            source_status = "delayed"
-            source_note = "Live geopolitical feeds are currently unavailable. Assessing from limited delayed coverage."
 
         now = datetime.now(timezone.utc)
         esc_count = len(esc_articles)
         deesc_count = len(deesc_articles)
         total = esc_count + deesc_count
 
+        signal_sources = self._signal_source_rollup(esc_articles, deesc_articles, source_errors=source_errors)
+        source_status = "live"
+        source_note = None
+        if total == 0 and source_errors:
+            source_status = "delayed"
+            source_note = "Assessing from partial source coverage while some official feeds are unavailable."
+        elif total > 0 and source_errors:
+            source_note = "Score computed from available low-latency sources; one or more supporting feeds were unavailable."
+
         if total == 0:
-            return self._delayed_placeholder(m, source_note or "No relevant geopolitical coverage could be confirmed yet. Assessing.") if source_status != "live" else self._empty_live_score(m)
+            if source_status != "live":
+                return self._delayed_placeholder(m, signal_sources=signal_sources, note=source_note or "Assessing from limited coverage.")
+            return self._empty_live_score(m, signal_sources=signal_sources)
 
         ratio = esc_count / total if total else 0.0
         volume_score = min(30, int(ratio * 37)) if total else 0
@@ -339,7 +294,6 @@ class GeopoliticalRiskService:
             for art in top_source[:5]
         ]
 
-        signal_sources = self._signal_source_rollup(esc_articles, deesc_articles, gdelt_limited=gdelt_limited, gdelt_unavailable=gdelt_unavailable)
         detail = self._build_detail(
             score=score,
             esc=esc_count,
@@ -388,42 +342,13 @@ class GeopoliticalRiskService:
                 "risk_factor_count": len(risk_factors),
                 "source_count": len({(a.get('domain') or '').lower() for a in esc_articles + deesc_articles if a.get('domain')}),
                 "source_family_count": len({(a.get('source_family') or '').lower() for a in esc_articles + deesc_articles if a.get('source_family')}),
+                "failed_source_count": len(source_errors),
             },
             source_status=source_status,
             source_note=source_note,
-            last_live_utc=updated_utc if source_status == "live" else (self._cache.get(m.id).last_live_utc if self._cache.get(m.id) else None),
+            last_live_utc=updated_utc,
             signal_sources=signal_sources,
         )
-
-    async def _query_gdelt(self, query: str, hours: int) -> list[dict]:
-        full_query = f"{query} sourcelang:english"
-        client = await self._get_client()
-        resp = await client.get(
-            GDELT_DOC_API,
-            params={
-                "query": full_query,
-                "mode": "artlist",
-                "maxrecords": "75",
-                "format": "json",
-                "timespan": f"{hours}h",
-            },
-        )
-        logger.info(f"[GeoRisk] GDELT status={resp.status_code} url={str(resp.url)[:150]}")
-        if resp.status_code == 429:
-            raise RateLimitError(self._retry_after_seconds(resp))
-        resp.raise_for_status()
-        data = resp.json() if resp.text else {}
-        articles = data.get("articles", []) if isinstance(data, dict) else data if isinstance(data, list) else []
-        out = []
-        for art in articles:
-            out.append({
-                "title": art.get("title", ""),
-                "url": art.get("url", ""),
-                "domain": art.get("domain", ""),
-                "seendate": art.get("seendate", ""),
-                "source_family": "gdelt",
-            })
-        return out
 
     async def _query_google_news(self, query: str, hours: int, source_family: str, kind: str) -> list[dict]:
         client = await self._get_client()
@@ -475,9 +400,7 @@ class GeopoliticalRiskService:
         resp.raise_for_status()
         html = resp.text
         items = []
-        keyword_patterns = [
-            "sanctions", "hamas", "iran", "houthi", "hezbollah", "yemen", "shipping", "oil", "export control", "embargo", "terror", "red sea"
-        ]
+        keyword_patterns = self._official_keywords(m) + ["sanctions", "shadow fleet", "shipping", "oil", "export control", "embargo", "terror"]
         for href, title in self._extract_h3_links(html):
             title_l = title.lower()
             if not any(k in title_l for k in keyword_patterns):
@@ -488,6 +411,7 @@ class GeopoliticalRiskService:
                 "domain": "treasury.gov",
                 "seendate": datetime.now(timezone.utc).isoformat(),
                 "source_family": "treasury_press",
+                "kind": self._infer_kind(title_l),
             })
         return items[:8]
 
@@ -496,8 +420,67 @@ class GeopoliticalRiskService:
         resp = await client.get(DEFENSE_RELEASES_RSS)
         resp.raise_for_status()
         articles = self._parse_rss_articles(resp.text, source_family="defense_rss", cutoff_hours=72, kind="escalation")
-        keywords = [a.lower() for a in m.key_actors] + ["carrier", "destroyer", "deployment", "iran", "israel", "red sea", "houthi", "hezbollah"]
+        keywords = self._official_keywords(m) + ["carrier", "destroyer", "deployment", "red sea", "hormuz", "strike", "missile"]
         return [a for a in articles if any(k in (a.get("title") or "").lower() for k in keywords)][:10]
+
+    async def _query_state_press(self, m: ThreatMonitor) -> list[dict]:
+        client = await self._get_client()
+        resp = await client.get(STATE_PRESS_URL)
+        resp.raise_for_status()
+        html = resp.text
+        items = []
+        keywords = self._official_keywords(m) + ["ceasefire", "truce", "sanctions", "hostage", "humanitarian", "shipping"]
+        for href, title in self._extract_anchor_links(html):
+            title_l = title.lower()
+            if not any(k in title_l for k in keywords):
+                continue
+            items.append({
+                "title": title,
+                "url": urljoin(STATE_PRESS_URL, href),
+                "domain": "state.gov",
+                "seendate": datetime.now(timezone.utc).isoformat(),
+                "source_family": "state_press",
+                "kind": self._infer_kind(title_l),
+            })
+        return items[:10]
+
+    async def _query_ofac_recent_actions(self, m: ThreatMonitor) -> list[dict]:
+        client = await self._get_client()
+        resp = await client.get(OFAC_RECENT_ACTIONS_URL)
+        resp.raise_for_status()
+        html = resp.text
+        items = []
+        keywords = self._official_keywords(m) + ["sanctions", "shadow fleet", "terrorism", "oil", "shipping", "iran", "hezbollah", "houthi", "hamas"]
+        for href, title in self._extract_anchor_links(html):
+            title_l = title.lower()
+            if not any(k in title_l for k in keywords):
+                continue
+            if not href.startswith("/") and "ofac.treasury.gov" not in href:
+                continue
+            items.append({
+                "title": title,
+                "url": urljoin(OFAC_RECENT_ACTIONS_URL, href),
+                "domain": "ofac.treasury.gov",
+                "seendate": datetime.now(timezone.utc).isoformat(),
+                "source_family": "ofac_recent",
+                "kind": self._infer_kind(title_l),
+            })
+        return items[:10]
+
+    @staticmethod
+    def _official_keywords(m: ThreatMonitor) -> list[str]:
+        kws = [a.lower() for a in m.key_actors]
+        kws += ["iran", "israel", "gaza", "hezbollah", "houthi", "red sea", "hormuz", "sanctions"]
+        return sorted(set(kws))
+
+    @staticmethod
+    def _infer_kind(title_l: str) -> str:
+        deescalation_tokens = ["ceasefire", "truce", "negotiation", "diplomatic", "talks", "agreement", "mediation", "humanitarian"]
+        if any(t in title_l for t in deescalation_tokens):
+            conflict_tokens = ["strike", "missile", "killed", "retaliation", "attack", "shelling", "casualties"]
+            if not any(t in title_l for t in conflict_tokens):
+                return "deescalation"
+        return "escalation"
 
     @staticmethod
     def _extract_h3_links(html: str) -> list[tuple[str, str]]:
@@ -508,6 +491,23 @@ class GeopoliticalRiskService:
             title = re.sub(r"\s+", " ", unescape(title)).strip()
             if title:
                 links.append((href, title))
+        return links
+
+    @staticmethod
+    def _extract_anchor_links(html: str) -> list[tuple[str, str]]:
+        pattern = re.compile(r"<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
+        links = []
+        seen = set()
+        for href, raw in pattern.findall(html):
+            title = re.sub(r"<[^>]+>", "", raw)
+            title = re.sub(r"\s+", " ", unescape(title)).strip()
+            if not title or len(title) < 12:
+                continue
+            key = (href, title)
+            if key in seen:
+                continue
+            seen.add(key)
+            links.append((href, title))
         return links
 
     def _parse_rss_articles(self, xml_text: str, *, source_family: str, cutoff_hours: int, kind: str) -> list[dict]:
@@ -572,46 +572,38 @@ class GeopoliticalRiskService:
         return sorted(keep.values(), key=lambda a: GeopoliticalRiskService._parse_date(a.get("seendate", "")) or datetime.fromtimestamp(0, tz=timezone.utc), reverse=True)
 
     @staticmethod
-    def _signal_source_rollup(esc_articles: list[dict], deesc_articles: list[dict], *, gdelt_limited: bool, gdelt_unavailable: bool) -> list[dict]:
+    def _signal_source_rollup(esc_articles: list[dict], deesc_articles: list[dict], *, source_errors: list[str]) -> list[dict]:
         rollup: dict[str, dict] = {}
         for art in esc_articles + deesc_articles:
             family = (art.get("source_family") or "unknown").lower()
             entry = rollup.setdefault(family, {"name": family, "count": 0, "status": "live"})
             entry["count"] += 1
-        if gdelt_limited:
-            rollup.setdefault("gdelt", {"name": "gdelt", "count": 0, "status": "assessing"})["status"] = "assessing"
-        elif gdelt_unavailable:
-            rollup.setdefault("gdelt", {"name": "gdelt", "count": 0, "status": "assessing"})["status"] = "assessing"
-        nice = []
         labels = {
-            "gdelt": "GDELT",
             "google_news": "Google News",
             "newsapi": "NewsAPI",
             "treasury_press": "Treasury press",
             "defense_rss": "Defense releases",
+            "state_press": "State press",
+            "ofac_recent": "OFAC recent actions",
             "unknown": "Other",
         }
-        order = ["gdelt", "google_news", "newsapi", "treasury_press", "defense_rss", "unknown"]
+        aliases = {
+            "google_news_esc": "google_news",
+            "google_news_deesc": "google_news",
+            "newsapi_esc": "newsapi",
+            "newsapi_deesc": "newsapi",
+        }
+        for err in source_errors:
+            fam = aliases.get(err, err)
+            entry = rollup.setdefault(fam, {"name": fam, "count": 0, "status": "assessing"})
+            entry["status"] = "assessing"
+        order = ["defense_rss", "state_press", "treasury_press", "ofac_recent", "newsapi", "google_news", "unknown"]
+        nice = []
         for key in order:
             if key in rollup:
                 item = rollup[key]
                 nice.append({"name": labels.get(key, key.title()), "count": item["count"], "status": item.get("status", "live")})
         return nice
-
-    def _enter_cooldown(self, retry_after_seconds: int | None = None) -> None:
-        seconds = retry_after_seconds or LIVE_SCORE_TTL_SECONDS
-        self._cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=max(seconds, FALLBACK_REASSESS_SECONDS))
-        self._cooldown_reason = f"Live geopolitical feed rate-limited; reassessing after {self._cooldown_until.isoformat()}."
-
-    @staticmethod
-    def _retry_after_seconds(resp: httpx.Response) -> int | None:
-        value = resp.headers.get("Retry-After")
-        if not value:
-            return None
-        try:
-            return int(value)
-        except ValueError:
-            return None
 
     @staticmethod
     def _with_source_state(score: ThreatScore, status: str, note: str) -> ThreatScore:
@@ -629,7 +621,7 @@ class GeopoliticalRiskService:
             score.last_live_utc = score.updated_utc
         return score
 
-    def _empty_live_score(self, m: ThreatMonitor) -> ThreatScore:
+    def _empty_live_score(self, m: ThreatMonitor, signal_sources: Optional[list[dict]] = None) -> ThreatScore:
         now = datetime.now(timezone.utc).isoformat()
         return ThreatScore(
             id=m.id,
@@ -637,7 +629,7 @@ class GeopoliticalRiskService:
             description=m.description,
             score=0,
             level="Low",
-            detail="Low escalation signal. No immediate threat to technical trading conditions.",
+            detail="Low escalation signal from current official and headline coverage. No immediate threat to technical trading conditions.",
             escalation_articles=0,
             deescalation_articles=0,
             coverage_articles=0,
@@ -645,14 +637,14 @@ class GeopoliticalRiskService:
             risk_factors=[],
             instruments=m.instruments,
             updated_utc=now,
-            components={"volume_ratio": 0, "absolute_volume": 0, "severity_keywords": 0, "background_context": 0, "recency": 0, "factor_diversity": 0, "source_breadth": 0, "official_signals": 0, "esc_count": 0, "deesc_count": 0, "ratio": 0.0, "severity_hits": 0, "recent_2h": 0, "recent_6h": 0, "risk_factor_count": 0, "source_count": 0, "source_family_count": 0},
+            components={"volume_ratio": 0, "absolute_volume": 0, "severity_keywords": 0, "background_context": 0, "recency": 0, "factor_diversity": 0, "source_breadth": 0, "official_signals": 0, "esc_count": 0, "deesc_count": 0, "ratio": 0.0, "severity_hits": 0, "recent_2h": 0, "recent_6h": 0, "risk_factor_count": 0, "source_count": 0, "source_family_count": 0, "failed_source_count": 0},
             source_status="live",
             last_live_utc=now,
-            signal_sources=[{"name": "GDELT", "count": 0, "status": "live"}],
+            signal_sources=signal_sources or [],
         )
 
     @staticmethod
-    def _delayed_placeholder(m: ThreatMonitor, note: str) -> ThreatScore:
+    def _delayed_placeholder(m: ThreatMonitor, signal_sources: list[dict], note: str) -> ThreatScore:
         now = datetime.now(timezone.utc).isoformat()
         return ThreatScore(
             id=m.id,
@@ -668,10 +660,10 @@ class GeopoliticalRiskService:
             risk_factors=[],
             instruments=m.instruments,
             updated_utc=now,
-            components={"volume_ratio": 0, "absolute_volume": 0, "severity_keywords": 0, "background_context": 0, "recency": 0, "factor_diversity": 0, "source_breadth": 0, "official_signals": 0, "esc_count": 0, "deesc_count": 0, "ratio": 0.0, "severity_hits": 0, "recent_2h": 0, "recent_6h": 0, "risk_factor_count": 0, "source_count": 0, "source_family_count": 0},
+            components={"volume_ratio": 0, "absolute_volume": 0, "severity_keywords": 0, "background_context": 0, "recency": 0, "factor_diversity": 0, "source_breadth": 0, "official_signals": 0, "esc_count": 0, "deesc_count": 0, "ratio": 0.0, "severity_hits": 0, "recent_2h": 0, "recent_6h": 0, "risk_factor_count": 0, "source_count": 0, "source_family_count": 0, "failed_source_count": len([s for s in signal_sources if s.get('status') != 'live'])},
             source_status="delayed",
             source_note=note,
-            signal_sources=[{"name": "GDELT", "count": 0, "status": "assessing"}],
+            signal_sources=signal_sources,
         )
 
     @staticmethod
@@ -733,7 +725,7 @@ class GeopoliticalRiskService:
 
     @staticmethod
     def _official_signal_score(esc_articles: list[dict]) -> int:
-        official = [a for a in esc_articles if (a.get("source_family") or "").lower() in {"treasury_press", "defense_rss"}]
+        official = [a for a in esc_articles if (a.get("source_family") or "").lower() in {"treasury_press", "defense_rss", "state_press", "ofac_recent"}]
         if len(official) >= 3:
             return 6
         if len(official) >= 1:
@@ -919,3 +911,9 @@ class GeopoliticalRiskService:
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+
+
+async def asyncio_gather_named(tasks: list[tuple[str, object, str]]) -> list[tuple[str, str, object]]:
+    coros = [coro for _, coro, _ in tasks]
+    results = await asyncio.gather(*coros, return_exceptions=True)
+    return [(name, channel, result) for (name, _, channel), result in zip(tasks, results)]

@@ -50,8 +50,6 @@ services:
         value: "true"
       - key: ENABLE_BINANCE_ANNOUNCEMENTS_ADAPTER
         value: "true"
-      - key: ENABLE_GDELT_GEOPOLITICAL_ADAPTER
-        value: "true"
       - key: TRADINGECONOMICS_BASE_URL
         value: https://api.tradingeconomics.com
       - key: TRADINGECONOMICS_CLIENT_KEY

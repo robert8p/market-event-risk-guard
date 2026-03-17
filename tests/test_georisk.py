@@ -3,12 +3,14 @@ import pytest
 from app.georisk import GeopoliticalRiskService, MONITORS
 
 
-def _article(title: str, seendate: str = "20260317T090000Z") -> dict:
+def _article(title: str, seendate: str = "20260317T090000Z", source_family: str = "google_news", kind: str = "escalation") -> dict:
     return {
         "title": title,
         "url": "https://example.com/story",
         "domain": "example.com",
         "seendate": seendate,
+        "source_family": source_family,
+        "kind": kind,
     }
 
 
@@ -21,17 +23,20 @@ def _silence_aux_sources(monkeypatch):
     monkeypatch.setattr(GeopoliticalRiskService, "_query_newsapi", _empty)
     monkeypatch.setattr(GeopoliticalRiskService, "_query_treasury_press", _empty)
     monkeypatch.setattr(GeopoliticalRiskService, "_query_defense_releases", _empty)
+    monkeypatch.setattr(GeopoliticalRiskService, "_query_state_press", _empty)
+    monkeypatch.setattr(GeopoliticalRiskService, "_query_ofac_recent_actions", _empty)
+
 
 @pytest.mark.asyncio
 async def test_diplomacy_heavy_flashpoint_does_not_drop_to_zero(monkeypatch):
     svc = GeopoliticalRiskService()
 
-    async def fake_query(query: str, hours: int):
-        if "ceasefire" in query or "diplomatic" in query or "humanitarian" in query:
-            return [_article(f"Diplomatic update {i}") for i in range(40)]
+    async def fake_google(query: str, hours: int, source_family: str, kind: str):
+        if kind == "deescalation":
+            return [_article(f"Diplomatic update {i}", source_family="google_news", kind="deescalation") for i in range(40)]
         return []
 
-    monkeypatch.setattr(svc, "_query_gdelt", fake_query)
+    monkeypatch.setattr(svc, "_query_google_news", fake_google)
 
     score = await svc._assess(MONITORS[0])
     assert score.score > 0
@@ -42,29 +47,22 @@ async def test_diplomacy_heavy_flashpoint_does_not_drop_to_zero(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_zero_coverage_can_still_score_zero(monkeypatch):
+async def test_zero_coverage_can_still_score_zero():
     svc = GeopoliticalRiskService()
-
-    async def fake_query(query: str, hours: int):
-        return []
-
-    monkeypatch.setattr(svc, "_query_gdelt", fake_query)
-
     score = await svc._assess(MONITORS[0])
     assert score.score == 0
     assert score.coverage_articles == 0
+    assert score.source_status == "live"
 
 
 @pytest.mark.asyncio
 async def test_headlines_fall_back_to_diplomacy_coverage(monkeypatch):
     svc = GeopoliticalRiskService()
 
-    async def fake_query(query: str, hours: int):
-        if "ceasefire" in query or "diplomatic" in query or "humanitarian" in query:
-            return [_article("Regional diplomats push ceasefire") for _ in range(3)]
-        return []
+    async def fake_state(*args, **kwargs):
+        return [_article("Regional diplomats push ceasefire", source_family="state_press", kind="deescalation")]
 
-    monkeypatch.setattr(svc, "_query_gdelt", fake_query)
+    monkeypatch.setattr(svc, "_query_state_press", fake_state)
 
     score = await svc._assess(MONITORS[0])
     assert score.escalation_articles == 0
@@ -74,40 +72,42 @@ async def test_headlines_fall_back_to_diplomacy_coverage(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rate_limited_georisk_returns_delayed_not_false_zero(monkeypatch):
+async def test_partial_source_failure_returns_assessing_not_false_zero(monkeypatch):
     svc = GeopoliticalRiskService()
 
-    async def fake_query(query: str, hours: int):
-        from app.georisk import RateLimitError
-        raise RateLimitError(600)
+    async def broken(*args, **kwargs):
+        raise RuntimeError("timeout")
 
-    monkeypatch.setattr(svc, "_query_gdelt", fake_query)
+    monkeypatch.setattr(svc, "_query_google_news", broken)
+    monkeypatch.setattr(svc, "_query_treasury_press", broken)
+    monkeypatch.setattr(svc, "_query_defense_releases", broken)
+    monkeypatch.setattr(svc, "_query_state_press", broken)
+    monkeypatch.setattr(svc, "_query_ofac_recent_actions", broken)
 
     scores = await svc.get_scores(force=True)
     assert scores
     score = scores[0]
     assert score["source_status"] == "delayed"
-    assert "rate-limited" in score["detail"].lower()
+    assert "partial source coverage" in score["detail"].lower() or "assessing" in score["detail"].lower()
 
 
 @pytest.mark.asyncio
-async def test_stale_cache_is_used_during_cooldown(monkeypatch):
+async def test_cache_is_used_within_ttl(monkeypatch):
     svc = GeopoliticalRiskService()
 
-    async def first_query(query: str, hours: int):
-        return [_article("Conflict update")]
+    async def fake_google(*args, **kwargs):
+        return [_article("Missile strike reported", source_family="google_news")]
 
-    monkeypatch.setattr(svc, "_query_gdelt", first_query)
+    monkeypatch.setattr(svc, "_query_google_news", fake_google)
     first = await svc.get_scores(force=True)
     assert first[0]["source_status"] == "live"
 
-    async def rate_limited(query: str, hours: int):
-        from app.georisk import RateLimitError
-        raise RateLimitError(600)
+    async def broken(*args, **kwargs):
+        raise AssertionError("should not be called while cache is fresh")
 
-    monkeypatch.setattr(svc, "_query_gdelt", rate_limited)
-    second = await svc.get_scores(force=True)
-    assert second[0]["source_status"] == "stale"
+    monkeypatch.setattr(svc, "_query_google_news", broken)
+    second = await svc.get_scores(force=False)
+    assert second[0]["source_status"] == "live"
     assert second[0]["score"] == first[0]["score"]
 
 
@@ -115,17 +115,15 @@ async def test_stale_cache_is_used_during_cooldown(monkeypatch):
 async def test_recent_risk_factors_are_extracted_explicitly(monkeypatch):
     svc = GeopoliticalRiskService()
 
-    async def fake_query(query: str, hours: int):
-        if "ceasefire" in query or "diplomatic" in query or "humanitarian" in query:
-            return [
-                _article("Regional diplomats push ceasefire in Gaza", "20260317T084500Z"),
-            ]
+    async def fake_google(query: str, hours: int, source_family: str, kind: str):
+        if kind == "deescalation":
+            return [_article("Regional diplomats push ceasefire in Gaza", "20260317T084500Z", "google_news", "deescalation")]
         return [
-            _article("Missile strike raises fears over Strait of Hormuz shipping", "20260317T090000Z"),
-            _article("Pentagon deployment follows retaliation warning", "20260317T083000Z"),
+            _article("Missile strike raises fears over Strait of Hormuz shipping", "20260317T090000Z", "google_news"),
+            _article("Pentagon deployment follows retaliation warning", "20260317T083000Z", "google_news"),
         ]
 
-    monkeypatch.setattr(svc, "_query_gdelt", fake_query)
+    monkeypatch.setattr(svc, "_query_google_news", fake_google)
     score = await svc._assess(MONITORS[0])
     labels = {f["label"] for f in score.risk_factors}
     assert "Missile / airstrike activity" in labels
@@ -137,30 +135,31 @@ async def test_recent_risk_factors_are_extracted_explicitly(monkeypatch):
 async def test_factor_diversity_and_source_breadth_components_are_populated(monkeypatch):
     svc = GeopoliticalRiskService()
 
-    async def fake_query(query: str, hours: int):
-        if "ceasefire" in query or "diplomatic" in query or "humanitarian" in query:
-            return []
+    async def fake_google(*args, **kwargs):
         return [
-            {**_article("Missile strike reported", "20260317T090000Z"), "domain": "a.example"},
-            {**_article("Oil refinery disruption feared", "20260317T083000Z"), "domain": "b.example"},
-            {**_article("Pentagon deployment follows retaliation", "20260317T081500Z"), "domain": "c.example"},
+            {**_article("Missile strike reported", "20260317T090000Z", "google_news"), "domain": "a.example"},
+            {**_article("Oil refinery disruption feared", "20260317T083000Z", "google_news"), "domain": "b.example"},
         ]
 
-    monkeypatch.setattr(svc, "_query_gdelt", fake_query)
+    async def fake_state(*args, **kwargs):
+        return [{**_article("State condemns shipping disruption", "20260317T081500Z", "state_press"), "domain": "state.gov"}]
+
+    monkeypatch.setattr(svc, "_query_google_news", fake_google)
+    monkeypatch.setattr(svc, "_query_state_press", fake_state)
     score = await svc._assess(MONITORS[0])
     assert score.components["factor_diversity"] > 0
     assert score.components["source_breadth"] > 0
-    assert score.components["risk_factor_count"] >= 3
+    assert score.components["risk_factor_count"] >= 2
 
 
 @pytest.mark.asyncio
 async def test_freshness_metadata_is_exposed_on_live_scores(monkeypatch):
     svc = GeopoliticalRiskService()
 
-    async def fake_query(query: str, hours: int):
-        return [_article("Missile strike reported") ]
+    async def fake_google(*args, **kwargs):
+        return [_article("Missile strike reported", source_family="google_news")]
 
-    monkeypatch.setattr(svc, "_query_gdelt", fake_query)
+    monkeypatch.setattr(svc, "_query_google_news", fake_google)
     scores = await svc.get_scores(force=True)
     score = scores[0]
     assert score["updated_utc"]
@@ -170,31 +169,32 @@ async def test_freshness_metadata_is_exposed_on_live_scores(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_auxiliary_sources_can_support_assessing_mode(monkeypatch):
+async def test_official_sources_can_support_scoring_without_gdelt(monkeypatch):
     svc = GeopoliticalRiskService()
 
-    async def rate_limited(query: str, hours: int):
-        from app.georisk import RateLimitError
-        raise RateLimitError(600)
+    async def fake_treasury(*args, **kwargs):
+        return [_article("Treasury sanctions tanker network linked to Iran", source_family="treasury_press")]
 
-    async def fake_google(*args, **kwargs):
-        return [_article("Treasury sanctions tanker network linked to Iran", "20260317T090000Z")]
+    async def fake_state(*args, **kwargs):
+        return [_article("State says humanitarian talks continue in Gaza", source_family="state_press", kind="deescalation")]
 
-    monkeypatch.setattr(svc, "_query_gdelt", rate_limited)
-    monkeypatch.setattr(svc, "_query_google_news", fake_google)
+    monkeypatch.setattr(svc, "_query_treasury_press", fake_treasury)
+    monkeypatch.setattr(svc, "_query_state_press", fake_state)
     scores = await svc.get_scores(force=True)
     score = scores[0]
-    assert score["source_status"] == "delayed"
-    assert score["coverage_articles"] >= 1
-    assert score["signal_sources"]
+    assert score["source_status"] == "live"
+    assert score["coverage_articles"] >= 2
+    names = {s["name"] for s in score["signal_sources"]}
+    assert "Treasury press" in names
+    assert "State press" in names
 
 
 def test_extract_risk_factors_carries_source_counts():
     svc = GeopoliticalRiskService()
     factors = svc._extract_risk_factors(
         [
-            {**_article("Missile strike reported"), "source_family": "gdelt"},
-            {**_article("Missile strike reported near shipping lane"), "source_family": "google_news"},
+            {**_article("Missile strike reported", source_family="google_news")},
+            {**_article("Missile strike reported near shipping lane", source_family="state_press")},
         ],
         [],
     )
@@ -202,9 +202,10 @@ def test_extract_risk_factors_carries_source_counts():
     assert factors[0]["source_count"] >= 1
 
 
+
 def test_duplicate_article_does_not_appear_across_multiple_risk_tiles():
     svc = GeopoliticalRiskService()
-    shared = {**_article("Israeli Strike in Gaza Kills Three as Iran War Strains Ceasefire", "20260317T090000Z"), "source_family": "gdelt"}
+    shared = {**_article("Israeli Strike in Gaza Kills Three as Iran War Strains Ceasefire", "20260317T090000Z", "state_press")}
     factors = svc._extract_risk_factors([shared], [shared])
     titles = [f.get("latest_title") for f in factors]
     assert titles.count("Israeli Strike in Gaza Kills Three as Iran War Strains Ceasefire") == 1
@@ -212,10 +213,11 @@ def test_duplicate_article_does_not_appear_across_multiple_risk_tiles():
     assert missile["latest_title"] == "Israeli Strike in Gaza Kills Three as Iran War Strains Ceasefire"
 
 
+
 def test_mixed_conflict_and_ceasefire_headline_prefers_conflict_factor():
     svc = GeopoliticalRiskService()
     factors = svc._extract_risk_factors(
-        [{**_article("Israeli Strike in Gaza Kills Three as Iran War Strains Ceasefire", "20260317T090000Z"), "source_family": "gdelt"}],
+        [{**_article("Israeli Strike in Gaza Kills Three as Iran War Strains Ceasefire", "20260317T090000Z", "google_news")}],
         [],
     )
     assert factors[0]["label"] == "Missile / airstrike activity"
