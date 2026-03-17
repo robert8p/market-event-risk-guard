@@ -162,7 +162,7 @@ class GeopoliticalRiskService:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.settings.http_timeout_seconds),
                 follow_redirects=True,
-                headers={"User-Agent": "MarketEventRiskGuard/2.3 (+https://render.com)"},
+                headers={"User-Agent": "MarketEventRiskGuard/2.3.1 (+https://render.com)"},
             )
         return self._client
 
@@ -405,6 +405,8 @@ class GeopoliticalRiskService:
             title_l = title.lower()
             if not any(k in title_l for k in keyword_patterns):
                 continue
+            if not self._matches_monitor_region(title_l, m):
+                continue
             items.append({
                 "title": title,
                 "url": urljoin(TREASURY_PRESS_URL, href),
@@ -421,7 +423,11 @@ class GeopoliticalRiskService:
         resp.raise_for_status()
         articles = self._parse_rss_articles(resp.text, source_family="defense_rss", cutoff_hours=72, kind="escalation")
         keywords = self._official_keywords(m) + ["carrier", "destroyer", "deployment", "red sea", "hormuz", "strike", "missile"]
-        return [a for a in articles if any(k in (a.get("title") or "").lower() for k in keywords)][:10]
+        return [
+            a for a in articles
+            if any(k in (a.get("title") or "").lower() for k in keywords)
+            and self._matches_monitor_region((a.get("title") or "").lower(), m)
+        ][:10]
 
     async def _query_state_press(self, m: ThreatMonitor) -> list[dict]:
         client = await self._get_client()
@@ -433,6 +439,8 @@ class GeopoliticalRiskService:
         for href, title in self._extract_anchor_links(html):
             title_l = title.lower()
             if not any(k in title_l for k in keywords):
+                continue
+            if not self._matches_monitor_region(title_l, m):
                 continue
             items.append({
                 "title": title,
@@ -455,6 +463,8 @@ class GeopoliticalRiskService:
             title_l = title.lower()
             if not any(k in title_l for k in keywords):
                 continue
+            if not self._matches_monitor_region(title_l, m):
+                continue
             if not href.startswith("/") and "ofac.treasury.gov" not in href:
                 continue
             items.append({
@@ -472,6 +482,20 @@ class GeopoliticalRiskService:
         kws = [a.lower() for a in m.key_actors]
         kws += ["iran", "israel", "gaza", "hezbollah", "houthi", "red sea", "hormuz", "sanctions"]
         return sorted(set(kws))
+
+    @staticmethod
+    def _monitor_region_keywords(m: ThreatMonitor) -> list[str]:
+        kws = {a.lower() for a in m.key_actors if a.lower() not in {"united states", "pentagon"}}
+        kws.update({
+            "middle east", "iran", "iranian", "israel", "israeli", "gaza", "west bank", "palestinian",
+            "hamas", "hezbollah", "lebanon", "lebanese", "houthi", "houthis", "yemen", "yemeni",
+            "syria", "syrian", "iraq", "iraqi", "red sea", "gulf of aden", "strait of hormuz", "hormuz",
+            "tehran", "tel aviv", "jerusalem", "idf", "irgc",
+        })
+        return sorted(kws)
+
+    def _matches_monitor_region(self, text_l: str, m: ThreatMonitor) -> bool:
+        return any(k in text_l for k in self._monitor_region_keywords(m))
 
     @staticmethod
     def _infer_kind(title_l: str) -> str:

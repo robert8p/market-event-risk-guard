@@ -1,4 +1,4 @@
-# Market Event Risk Guard v2.3
+# Market Event Risk Guard v2.3.1
 
 A production-ready event-risk filter for technical traders. Identifies when external events could distort normal price behaviour, making technical indicators unreliable.
 

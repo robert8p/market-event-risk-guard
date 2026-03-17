@@ -221,3 +221,21 @@ def test_mixed_conflict_and_ceasefire_headline_prefers_conflict_factor():
         [],
     )
     assert factors[0]["label"] == "Missile / airstrike activity"
+
+
+def test_middle_east_region_gate_excludes_nicaragua_sanctions_title():
+    svc = GeopoliticalRiskService()
+    monitor = MONITORS[0]
+    assert not svc._matches_monitor_region(
+        "treasury sanctions nicaraguan officials enabling the murillo-ortega dictatorship repression",
+        monitor,
+    )
+
+
+def test_middle_east_region_gate_keeps_iran_sanctions_title():
+    svc = GeopoliticalRiskService()
+    monitor = MONITORS[0]
+    assert svc._matches_monitor_region(
+        "treasury sanctions shipping network moving iranian oil",
+        monitor,
+    )

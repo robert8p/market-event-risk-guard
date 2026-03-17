@@ -153,7 +153,7 @@
         + '<div class="tg-label">' + esc(gaugeLabel) + '</div>'
         + '</div>'
         + '<div class="threat-body">'
-        + '<div class="tb-title">' + esc(t.label) + ' <span class="threat-v2-badge">v2.3</span></div>'
+        + '<div class="tb-title">' + esc(t.label) + ' <span class="threat-v2-badge">v2.3.1</span></div>'
         + '<div class="threat-bar-track"><div class="threat-bar-fill ' + barCls + '" style="width:' + barWidth + '%"></div></div>'
         + freshnessHtml
         + '<div class="tb-detail">' + esc(t.detail) + '</div>'
