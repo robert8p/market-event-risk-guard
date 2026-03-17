@@ -1,0 +1,4 @@
+Repo root sanity check:
+- Dockerfile line 1 must be: FROM python:3.12-slim
+- tests/test_correctness.py must be under tests/
+- tests/conftest.py must be under tests/

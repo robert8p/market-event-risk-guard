@@ -1,0 +1,74 @@
+services:
+  - type: web
+    name: market-event-risk-guard
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_NAME
+        value: Market Event Risk Guard
+      - key: APP_ENV
+        value: production
+      - key: APP_TIMEZONE
+        value: Europe/London
+      - key: DEFAULT_WINDOW_HOURS
+        value: "8"
+      - key: REFRESH_INTERVAL_SECONDS
+        value: "60"
+      - key: CACHE_TTL_SECONDS
+        value: "60"
+      - key: HTTP_TIMEOUT_SECONDS
+        value: "15"
+      - key: MAX_EVENTS
+        value: "200"
+      - key: NEWS_LOOKBACK_HOURS
+        value: "12"
+      - key: ENABLE_TRADINGECONOMICS_ADAPTER
+        value: "true"
+      - key: ENABLE_FMP_EARNINGS_ADAPTER
+        value: "true"
+      - key: ENABLE_COINMARKETCAL_ADAPTER
+        value: "true"
+      - key: ENABLE_NEWS_ADAPTER
+        value: "true"
+      - key: ENABLE_COINBASE_STATUS_ADAPTER
+        value: "true"
+      - key: ENABLE_COINBASE_EXCHANGE_STATUS_ADAPTER
+        value: "true"
+      - key: ENABLE_FED_CALENDAR_ADAPTER
+        value: "true"
+      - key: ENABLE_SEC_NEWS_ADAPTER
+        value: "true"
+      - key: ENABLE_FED_PRESS_ADAPTER
+        value: "true"
+      - key: ENABLE_KRAKEN_STATUS_ADAPTER
+        value: "true"
+      - key: ENABLE_TREASURY_AUCTION_ADAPTER
+        value: "true"
+      - key: ENABLE_ECB_CALENDAR_ADAPTER
+        value: "true"
+      - key: ENABLE_BINANCE_ANNOUNCEMENTS_ADAPTER
+        value: "true"
+      - key: ENABLE_GDELT_GEOPOLITICAL_ADAPTER
+        value: "true"
+      - key: TRADINGECONOMICS_BASE_URL
+        value: https://api.tradingeconomics.com
+      - key: TRADINGECONOMICS_CLIENT_KEY
+        sync: false
+      - key: TRADINGECONOMICS_CLIENT_SECRET
+        sync: false
+      - key: FMP_BASE_URL
+        value: https://financialmodelingprep.com/stable
+      - key: FMP_API_KEY
+        sync: false
+      - key: COINMARKETCAL_BASE_URL
+        value: https://developers.coinmarketcal.com/v1
+      - key: COINMARKETCAL_API_KEY
+        sync: false
+      - key: NEWSAPI_BASE_URL
+        value: https://newsapi.org/v2
+      - key: NEWSAPI_KEY
+        sync: false
+      - key: BREAKING_NEWS_QUERY
+        value: "(Fed OR FOMC OR CPI OR inflation OR payrolls OR tariffs OR sanctions OR geopolitical OR SEC OR ETF OR bitcoin OR ethereum OR stablecoin OR exchange outage OR listing OR delisting)"

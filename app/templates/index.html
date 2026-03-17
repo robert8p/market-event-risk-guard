@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ app_name }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+</head>
+<body>
+
+  <!-- ── Header ──────────────────────────────────────────── -->
+  <header class="app-header">
+    <h1><span class="shield">🛡️</span> {{ app_name }}</h1>
+    <div class="header-meta">
+      <span id="header-dot" class="dot dot-green"></span>
+      <span>Updated <span id="header-updated">—</span></span>
+    </div>
+  </header>
+
+  <div class="container">
+
+    <!-- ── Banner alert ────────────────────────────────── -->
+    <div id="banner-alert" class="banner-alert"></div>
+
+    <!-- ── Geopolitical threat monitor ─────────────────── -->
+    <div class="section-label">
+      <span class="sl-title">Geopolitical Threat Monitor</span>
+      <span class="sl-sub">Background risk level based on recent global news, factor mix, and source breadth · separate from the event calendar below</span>
+    </div>
+    <div id="threat-panel" class="threat-panel"></div>
+
+    <!-- ── Summary cards ───────────────────────────────── -->
+    <div class="section-label" style="margin-top:.75rem">
+      <span class="sl-title">Event Calendar Risk</span>
+      <span class="sl-sub">Scheduled events, breaking developments, and active incidents within your selected window</span>
+    </div>
+    <div class="summary-row">
+      <div class="summary-card">
+        <span class="label">Events in Window</span>
+        <span id="sum-count" class="value val-green">—</span>
+        <span id="sum-window" class="sub">{{ default_window }}h window</span>
+      </div>
+      <div class="summary-card">
+        <span class="label">Highest Caution</span>
+        <span id="sum-caution" class="value val-green">—</span>
+        <span class="sub">Peak severity level</span>
+      </div>
+      <div class="summary-card">
+        <span class="label">Environment</span>
+        <span id="sum-env" class="value" style="font-size:1rem">—</span>
+        <span class="sub">Technical-trading conditions</span>
+      </div>
+    </div>
+
+    <!-- ── Verdict ─────────────────────────────────────── -->
+    <div id="verdict-card" class="verdict-card verdict-yes">
+      <div class="verdict-icon">⏳</div>
+      <div class="verdict-body">
+        <div class="headline">Loading event data…</div>
+        <div class="detail">Checking sources for upcoming market events.</div>
+      </div>
+    </div>
+
+    <!-- ── Do Not Trust Technicals ─────────────────────── -->
+    <div id="distortion-section" class="distortion-section"></div>
+
+    <!-- ── Filters ─────────────────────────────────────── -->
+    <div class="filter-bar">
+      <label>Window</label>
+      <button data-hours="1">1h</button>
+      <button data-hours="4">4h</button>
+      <button data-hours="8">8h</button>
+      <button data-hours="12">12h</button>
+      <button data-hours="24">24h</button>
+
+      <label style="margin-left:.6rem">Asset</label>
+      <select id="f-asset">
+        <option value="all">All</option>
+        <option value="equities">Equities</option>
+        <option value="crypto">Crypto</option>
+        <option value="both">Both</option>
+      </select>
+
+      <label>Severity</label>
+      <select id="f-severity">
+        <option value="all">All</option>
+        <option value="Extreme">Extreme</option>
+        <option value="High">High</option>
+        <option value="Moderate">Moderate</option>
+        <option value="Low">Low</option>
+      </select>
+
+      <label>Type</label>
+      <select id="f-class">
+        <option value="all">All</option>
+        <option value="scheduled">Scheduled</option>
+        <option value="breaking">Breaking</option>
+        <option value="ongoing">Ongoing</option>
+      </select>
+    </div>
+
+    <!-- ── Loading ─────────────────────────────────────── -->
+    <div id="loading" class="loading-overlay active">
+      <div class="spinner"></div>
+    </div>
+
+    <!-- ── Event list ──────────────────────────────────── -->
+    <div id="event-list" class="event-list"></div>
+
+    <!-- ── Source health ───────────────────────────────── -->
+    <div class="source-health">
+      <h3>Source Status</h3>
+      <div id="source-grid" class="source-grid"></div>
+    </div>
+
+  </div>
+
+  <script>
+    window.MERG_REFRESH = {{ refresh_interval }};
+    window.MERG_WINDOW = {{ default_window }};
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
